@@ -1057,6 +1057,39 @@ gen11_dsi_set_transcoder_timings(struct intel_encoder *encoder,
 	}
 }
 
+
+static void icl_dsi_force_ulps_exit(struct intel_encoder *encoder)
+{
+    struct intel_display *display = to_intel_display(encoder);
+    struct intel_dsi *intel_dsi = enc_to_intel_dsi(encoder);
+    enum port port;
+    enum transcoder dsi_trans;
+
+    drm_info(display->drm, "[DEBUG] icl_dsi_force_ulps_exit: Forcing ULPS exit and clock ungate
+");
+
+    /* Ungate clocks unconditionally */
+    gen11_dsi_ungate_clocks(encoder);
+
+    /* Exit ULPS for all ports */
+    for_each_dsi_port(port, intel_dsi->ports) {
+        dsi_trans = dsi_port_to_transcoder(port);
+        u32 lp_msg = intel_de_read(display, DSI_LP_MSG(dsi_trans));
+        lp_msg &= ~LINK_ENTER_ULPS;
+        intel_de_write(display, DSI_LP_MSG(dsi_trans), lp_msg);
+        if (wait_for_us(!(intel_de_read(display, DSI_LP_MSG(dsi_trans)) & LINK_IN_ULPS), 50)) {
+            drm_err(display->drm, "ULPS exit timeout on port %c
+", port_name(port));
+        } else {
+            drm_info(display->drm, "[DEBUG] ULPS exited on port %c
+", port_name(port));
+        }
+    }
+
+    /* Guardband delay per PRM */
+    udelay(40);
+}
+
 static void gen11_dsi_enable_transcoder(struct intel_encoder *encoder)
 {
 	struct intel_display *display = to_intel_display(encoder);
