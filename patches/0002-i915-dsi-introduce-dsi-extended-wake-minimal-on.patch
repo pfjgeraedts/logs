@@ -1,0 +1,66 @@
+
+diff --git a/drivers/gpu/drm/i915/display/icl_dsi.c b/drivers/gpu/drm/i915/display/icl_dsi.c
+index 8e88ac8..9f9faaa 100644
+--- a/drivers/gpu/drm/i915/display/icl_dsi.c
++++ b/drivers/gpu/drm/i915/display/icl_dsi.c
+@@ -45,6 +45,23 @@
+ #include "skl_universal_plane.h"
+ 
++/*
++ * -------------------------------------------------------------------------
++ * Module parameter: i915.dsi_extended_wake
++ *
++ * Purpose:
++ *   Enable the "full DSI wake" procedure during DPMS-ON recovery for MIPI-DSI
++ *   panels that require explicit ON sequences beyond the minimal atomic commit.
++ *
++ * Naming rationale:
++ *   We chose "dsi_extended_wake" instead of names like "force_on_dpms" because
++ *   the panel datasheet and Intel PRM indicate this is specified, correct
++ *   behavior for stricter panels (not a hack). For future evolution, another
++ *   appropriate name could be "enable_dsi_full_wake". We document both here
++ *   for maintainers; we use "dsi_extended_wake" in this implementation.
++ * -------------------------------------------------------------------------
++ */
++static bool i915_dsi_extended_wake = false;
++module_param_named(dsi_extended_wake, i915_dsi_extended_wake, bool, 0600);
++MODULE_PARM_DESC(dsi_extended_wake,
++    "Run VBT DISPLAY_ON/BACKLIGHT_ON sequences after transcoder enable for stricter MIPI-DSI panels (full wake).");
++
+ /* existing code continues… */
+ 
+@@ -1010,6 +1027,33 @@ static void gen11_dsi_enable_transcoder(struct intel_encoder *encoder)
+        for_each_dsi_port(port, intel_dsi->ports) {
+                dsi_trans = dsi_port_to_transcoder(port);
+                /* DEBUG: Log TRANSCONF before write */
+                drm_info(display->drm, "[DEBUG] TRANSCONF before enable: 0x%08x\n",
+                         intel_de_read(display, TRANSCONF(display, dsi_trans)));
+                intel_de_rmw(display, TRANSCONF(display, dsi_trans), 0,
+                             TRANSCONF_ENABLE);
+                if (intel_de_wait_for_set(display, TRANSCONF(display, dsi_trans),
+                                          TRANSCONF_STATE_ENABLE, 10))
+                        drm_err(display->drm, "DSI transcoder not enabled\n");
+        }
++
++       /*
++        * Minimal extended wake:
++        * If the module parameter is enabled, immediately re-run the panel's
++        * ON sequences (VBT) after transcoder enable. This is idempotent for
++        * most panels and recovers panels that require explicit ON on DPMS-ON.
++        *
++        * NOTE: We deliberately use the VBT sequences here. The explicit
++        * intel_backlight_enable() is performed in the standard enable path
++        * (gen11_dsi_enable()), and many panels use MIPI_SEQ_BACKLIGHT_ON
++        * internally anyway. We avoid calling intel_backlight_enable() here
++        * because crtc_state/conn_state are not in scope in this function.
++        */
++       if (i915_dsi_extended_wake) {
++               struct intel_dsi *intel_dsi_local = enc_to_intel_dsi(encoder);
++               drm_info(display->drm,
++                        "[DEBUG] dsi_extended_wake: re-running DISPLAY_ON and BACKLIGHT_ON\n");
++               intel_dsi_vbt_exec_sequence(intel_dsi_local, MIPI_SEQ_DISPLAY_ON);
++               intel_dsi_vbt_exec_sequence(intel_dsi_local, MIPI_SEQ_BACKLIGHT_ON);
++       }
+ }
+ 
+ /* …rest of file unchanged … */
