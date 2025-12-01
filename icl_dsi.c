@@ -1130,56 +1130,14 @@ static void gen11_dsi_enable_transcoder(struct intel_encoder *encoder)
 	 * because crtc_state/conn_state are not in scope in this function.
 	 */
 	if (i915_dsi_extended_wake) {
+		/* Force ULPS exit + clock ungate unconditionally, then rerun ON sequences */
+		drm_info(display->drm, "[DEBUG] dsi_extended_wake: forcing ULPS exit + clock ungate");
+		icl_dsi_force_ulps_exit(encoder);
 		struct intel_dsi *intel_dsi_local = enc_to_intel_dsi(encoder);
-			drm_info(display->drm,
-			"[DEBUG] dsi_extended_wake: ULPS exit + clock ungate + guardband + ON sequences\n");
-
-		/*
-		 * 1) Ungate clocks/power wells if they are gated.
-		 *    We check DPCLKA OFF bits and only ungate when needed.
-		 */
-		u32 dpclka_cfg = intel_de_read(display, ICL_DPCLKA_CFGCR0);
-		if (dpclka_cfg & (ICL_DPCLKA_CFGCR0_DDI_CLK_OFF(PORT_A) |
-						  ICL_DPCLKA_CFGCR0_DDI_CLK_OFF(PORT_B))) {
-			drm_info(display->drm, "[DEBUG] dsi_extended_wake: ungating DDI clocks\n");
-			gen11_dsi_ungate_clocks(encoder);
-		}
-
-		/*
-		 * 2) Exit ULPS, per-port, only if currently in ULPS.
-		 *    We use DSI_LP_MSG LINK_IN_ULPS bit for detection.
-		 */
-		for_each_dsi_port(port, intel_dsi_local->ports) {
-			enum transcoder dsi_trans = dsi_port_to_transcoder(port);
-			u32 lp_msg = intel_de_read(display, DSI_LP_MSG(dsi_trans));
-			if (lp_msg & LINK_IN_ULPS) {
-				drm_info(display->drm, "[DEBUG] dsi_extended_wake: exiting ULPS on port %c\n",
-							port_name(port));
-				/* clear LINK_ENTER_ULPS and wait for LINK_IN_ULPS to drop */
-				lp_msg &= ~LINK_ENTER_ULPS;
-				intel_de_write(display, DSI_LP_MSG(dsi_trans), lp_msg);
-				if (wait_for_us(!(intel_de_read(display, DSI_LP_MSG(dsi_trans)) & LINK_IN_ULPS), 50)) {
-					drm_err(display->drm, "dsi_extended_wake: ULPS exit timeout on port %c\n",
-							port_name(port));
-				}
-			}
-		}
-
-		/*
-		 * 3) Apply LP->HS wakeup guardband (platform WA).
-		 *    We skip adlp_set_lp_hs_wakeup_gb() because it's already defined elsewhere.
-		 *    Insert a small udelay as guardband to match PRM guidance.
-		 */
-		udelay(40); /* ~40us guardband is typical per PRM for ADL/TGL families */
-
-		/*
-		 * 4) Finally re-run ON sequences.
-		 *    We stick to VBT ON (DISPLAY_ON/BACKLIGHT_ON) here. The normal enable
-		 *    path calls intel_backlight_enable() where crtc_state/conn_state exist.
-		 */
 		intel_dsi_vbt_exec_sequence(intel_dsi_local, MIPI_SEQ_DISPLAY_ON);
 		intel_dsi_vbt_exec_sequence(intel_dsi_local, MIPI_SEQ_BACKLIGHT_ON);
 	}
+
 }
 
 static void gen11_dsi_setup_timeouts(struct intel_encoder *encoder,
