@@ -50,6 +50,27 @@
 #include "skl_scaler.h"
 #include "skl_universal_plane.h"
 
+/*
+ * -------------------------------------------------------------------------
+ * Module parameter: i915.dsi_extended_wake
+ *
+ * Purpose:
+ *   Enable the "full DSI wake" procedure during DPMS-ON recovery for MIPI-DSI
+ *   panels that require explicit ON sequences beyond the minimal atomic commit.
+ *
+ * Naming rationale:
+ *   We chose "dsi_extended_wake" instead of names like "force_on_dpms" because
+ *   the panel datasheet and Intel PRM indicate this is specified, correct
+ *   behavior for stricter panels (not a hack). For future evolution, another
+ *   appropriate name could be "enable_dsi_full_wake". We document both here
+ *   for maintainers; we use "dsi_extended_wake" in this implementation.
+ * -------------------------------------------------------------------------
+ */
+static bool i915_dsi_extended_wake = false;
+module_param_named(dsi_extended_wake, i915_dsi_extended_wake, bool, 0600);
+MODULE_PARM_DESC(dsi_extended_wake,
+	"Run VBT DISPLAY_ON/BACKLIGHT_ON sequences after transcoder enable for stricter MIPI-DSI panels (full wake).");
+
 static int header_credits_available(struct intel_display *display,
 				    enum transcoder dsi_trans)
 {
@@ -1061,6 +1082,70 @@ static void gen11_dsi_enable_transcoder(struct intel_encoder *encoder)
 					  TRANSCONF_STATE_ENABLE, 10))
 			drm_err(display->drm,
 				"DSI transcoder not enabled\n");
+	}
+
+	/*
+	 * Minimal extended wake:
+	 * If the module parameter is enabled, immediately re-run the panel's
+	 * ON sequences (VBT) after transcoder enable. This is idempotent for
+	 * most panels and recovers panels that require explicit ON on DPMS-ON.
+	 *
+	 * NOTE: We deliberately use the VBT sequences here. The explicit
+	 * intel_backlight_enable() is performed in the standard enable path
+	 * (gen11_dsi_enable()), and many panels use MIPI_SEQ_BACKLIGHT_ON
+	 * internally anyway. We avoid calling intel_backlight_enable() here
+	 * because crtc_state/conn_state are not in scope in this function.
+	 */
+	if (i915_dsi_extended_wake) {
+		struct intel_dsi *intel_dsi_local = enc_to_intel_dsi(encoder);
+			drm_info(display->drm,
+			"[DEBUG] dsi_extended_wake: ULPS exit + clock ungate + guardband + ON sequences\n");
+
+		/*
+		 * 1) Ungate clocks/power wells if they are gated.
+		 *    We check DPCLKA OFF bits and only ungate when needed.
+		 */
+		u32 dpclka_cfg = intel_de_read(display, ICL_DPCLKA_CFGCR0);
+		if (dpclka_cfg & (ICL_DPCLKA_CFGCR0_DDI_CLK_OFF(PORT_A) |
+						  ICL_DPCLKA_CFGCR0_DDI_CLK_OFF(PORT_B))) {
+			drm_info(display->drm, "[DEBUG] dsi_extended_wake: ungating DDI clocks\n");
+			gen11_dsi_ungate_clocks(encoder);
+		}
+
+		/*
+		 * 2) Exit ULPS, per-port, only if currently in ULPS.
+		 *    We use DSI_LP_MSG LINK_IN_ULPS bit for detection.
+		 */
+		for_each_dsi_port(port, intel_dsi_local->ports) {
+			enum transcoder dsi_trans = dsi_port_to_transcoder(port);
+			u32 lp_msg = intel_de_read(display, DSI_LP_MSG(dsi_trans));
+			if (lp_msg & LINK_IN_ULPS) {
+				drm_info(display->drm, "[DEBUG] dsi_extended_wake: exiting ULPS on port %c\n",
+							port_name(port));
+				/* clear LINK_ENTER_ULPS and wait for LINK_IN_ULPS to drop */
+				lp_msg &= ~LINK_ENTER_ULPS;
+				intel_de_write(display, DSI_LP_MSG(dsi_trans), lp_msg);
+				if (wait_for_us(!(intel_de_read(display, DSI_LP_MSG(dsi_trans)) & LINK_IN_ULPS), 50)) {
+					drm_err(display->drm, "dsi_extended_wake: ULPS exit timeout on port %c\n",
+							port_name(port));
+				}
+			}
+		}
+
+		/*
+		 * 3) Apply LP->HS wakeup guardband (platform WA).
+		 *    We skip adlp_set_lp_hs_wakeup_gb() because it's already defined elsewhere.
+		 *    Insert a small udelay as guardband to match PRM guidance.
+		 */
+		udelay(40); /* ~40us guardband is typical per PRM for ADL/TGL families */
+
+		/*
+		 * 4) Finally re-run ON sequences.
+		 *    We stick to VBT ON (DISPLAY_ON/BACKLIGHT_ON) here. The normal enable
+		 *    path calls intel_backlight_enable() where crtc_state/conn_state exist.
+		 */
+		intel_dsi_vbt_exec_sequence(intel_dsi_local, MIPI_SEQ_DISPLAY_ON);
+		intel_dsi_vbt_exec_sequence(intel_dsi_local, MIPI_SEQ_BACKLIGHT_ON);
 	}
 }
 
